@@ -22,8 +22,8 @@ PAYLOAD_SIZE = FRAME_COUNT * 2 * 2
 
 # Start with 500 for a clap / sharp loud sound.
 RMS_THRESHOLD = 700.0
-WINDOW_SAMPLES = 2048
-PRE_TRIGGER_SAMPLES = 512
+WINDOW_SAMPLES = 512
+PRE_TRIGGER_SAMPLES = 128
 
 
 # Maximum physically possible sample delay
@@ -149,57 +149,81 @@ def calculate_rms(samples):
 
 def estimate_delay(left, right):
 
+    # Convert to float
+    left = left.astype(np.float64)
+    right = right.astype(np.float64)
+
     # Remove DC offset
-    left = (
-        left
-        - np.mean(left)
-    )
+    left -= np.mean(left)
+    right -= np.mean(right)
 
-    right = (
-        right
-        - np.mean(right)
-    )
+    # --------------------------------------------------
+    # GCC-PHAT
+    # --------------------------------------------------
 
-    # Cross-correlation
-    correlation = np.correlate(
+    # FFT size
+    n = len(left) + len(right)
+
+    # Convert signals to frequency domain
+    LEFT = np.fft.rfft(
         left,
+        n=n
+    )
+
+    RIGHT = np.fft.rfft(
         right,
-        mode="full"
+        n=n
     )
 
-    # Corresponding lag values
+    # Cross-power spectrum
+    cross_spectrum = (
+        LEFT * np.conj(RIGHT)
+    )
+
+    # PHAT normalization
+    magnitude = np.abs(
+        cross_spectrum
+    )
+
+    cross_spectrum /= (
+        magnitude + 1e-12
+    )
+
+    # Back to time domain
+    correlation = np.fft.irfft(
+        cross_spectrum,
+        n=n
+    )
+
+    # --------------------------------------------------
+    # Only look inside physically possible range
+    # --------------------------------------------------
+
+    # Negative lags are stored at the end
+    correlation = np.concatenate(
+        (
+            correlation[-MAX_LAG:],
+            correlation[:MAX_LAG + 1]
+        )
+    )
+
     lags = np.arange(
-        -len(right) + 1,
-        len(left)
+        -MAX_LAG,
+        MAX_LAG + 1
     )
 
-    # Only search physically possible range
-    valid = (
-        (lags >= -MAX_LAG)
-        &
-        (lags <= MAX_LAG)
-    )
-
-    correlation_valid = (
-        correlation[valid]
-    )
-
-    lags_valid = (
-        lags[valid]
-    )
-
-    # Strongest match
+    # Find strongest GCC-PHAT peak
     best_index = np.argmax(
-        correlation_valid
+        np.abs(correlation)
     )
 
     best_lag = int(
-        lags_valid[best_index]
+        lags[best_index]
     )
 
+    # Convert sample lag to time
     delay_seconds = (
-        best_lag
-        / SAMPLE_RATE
+        best_lag / SAMPLE_RATE
     )
 
     delay_us = (
